@@ -1,0 +1,134 @@
+services:
+  # MySQL 8.x Database Engine
+  mysql:
+    image: mysql:8.4
+    container_name: logistics_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_secure_pass
+      MYSQL_DATABASE: logistics_db
+      MYSQL_USER: logistics_user
+      MYSQL_PASSWORD: logistics_pass
+    ports:
+      # Bound to localhost interface to avoid unintended external network exposure
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - logistics_net
+
+  # Redis In-Memory Data Store (Celery Broker & Cache)
+  redis:
+    image: redis:7-alpine
+    container_name: logistics_redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - logistics_net
+
+  # FastAPI Core Application Service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: logistics_api
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=logistics_user
+      - DB_PASSWORD=logistics_pass
+      - DB_NAME=logistics_db
+      - DATABASE_URL=mysql+pymysql://logistics_user:logistics_pass@mysql:3306/logistics_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - logistics_net
+
+  # Celery Background Task Worker
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: logistics_celery_worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "--loglevel=info"]
+    environment:
+      - ENVIRONMENT=development
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=logistics_user
+      - DB_PASSWORD=logistics_pass
+      - DB_NAME=logistics_db
+      - DATABASE_URL=mysql+pymysql://logistics_user:logistics_pass@mysql:3306/logistics_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - logistics_net
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: logistics_nginx
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/nginx-health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - logistics_net
+
+networks:
+  logistics_net:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  redis_data:
